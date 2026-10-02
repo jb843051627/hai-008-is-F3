@@ -3,8 +3,10 @@ import cn.hutool.core.date.DateUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.fc.v2.model.auto.TSysUser;
 import com.fc.v2.service.ITIsHazTaskService;
+import com.fc.v2.service.ITIsRectApplyService;
 import com.fc.v2.service.ITSysUserService;
 import com.fc.v2.service.haz.RoundScreen;
+import com.fc.v2.service.rect.UrgeScreen;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -24,6 +26,9 @@ public class V2Task {
 
 	@Autowired
 	private ITIsHazTaskService isHazTaskService;
+
+	@Autowired
+	private ITIsRectApplyService rectApplyService;
 
     /**
      * 无参的任务
@@ -57,5 +62,15 @@ public class V2Task {
 		System.out.println("催办派发轮次[" + screen.getState() + "] " + screen.getMessage()
 				+ "（待派=" + screen.getWaitCnt() + " 已派=" + screen.getDispatchedCnt()
 				+ " 挂起=" + screen.getSuspendedCnt() + "）执行时间:" + DateUtil.now());
+	}
+	/**
+	 * 整改申请层级超时催办（由定时任务配置：v2Task.urgeRectApply()）。
+	 * 只催审批中、卡在某一层超过该层时限的单；同一轮同一级只催一次并留痕。
+	 * 已作废/已结案的单扫不到，催办不碰单子任何一栏。
+	 */
+	public void urgeRectApply()
+	{
+		UrgeScreen screen = rectApplyService.urgeScan();
+		System.out.println("整改申请催办：" + screen.getMessage() + " 执行时间:" + DateUtil.now());
 	}
 }
