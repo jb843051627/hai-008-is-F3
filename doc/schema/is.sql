@@ -255,6 +255,112 @@ CREATE TABLE IF NOT EXISTS t_is_rect_bill (
   PRIMARY KEY (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='重大隐患整改处置签核单';
 
+-- 隐患整改申请审批层级配置：层级次序由平台配置写死，不写在申请单上——单上只存"当前停在哪一级"
+-- （level_no），下一级是谁、共几级，一律查本表。改次序/换签署人动本表，不动任何一张在途单。
+-- signer 为该级法定签署人登录账号；代办不换人（单上法定签署人仍取本表），代办事实另落签署留痕。
+-- time_limit_hours：单子在这一级卡住超过这个钟点就该被催办，催办留痕 t_is_rect_urge。
+CREATE TABLE IF NOT EXISTS t_is_rect_level (
+  id bigint NOT NULL COMMENT '主键',
+  level_no int NOT NULL COMMENT '层级次序 0 起步，小的先签（次序只此一处说了算）',
+  level_name varchar(64) DEFAULT NULL COMMENT '层级名（班组申报/安环科审核/分管领导审批…）',
+  signer varchar(64) DEFAULT NULL COMMENT '本級法定签署人登录账号（待办按登录人对这一档）',
+  time_limit_hours int DEFAULT NULL COMMENT '本級允停钟点；超过即催办（空=不催）',
+  status int DEFAULT '0' COMMENT '情形 0启用 1停用（停用不影响在途单，只挡新进）',
+  del_flag int DEFAULT '0' COMMENT '删除标记 0正常 1删除',
+  create_by varchar(64) DEFAULT NULL COMMENT '创建者',
+  create_time datetime DEFAULT NULL COMMENT '创建时间',
+  update_by varchar(64) DEFAULT NULL COMMENT '更新者',
+  update_time datetime DEFAULT NULL COMMENT '更新时间',
+  remark varchar(500) DEFAULT NULL COMMENT '备注',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_rect_level_no (level_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='隐患整改审批层级配置（次序平台写死）';
+
+-- 隐患整改申请单：一张单一行，字段固定。
+-- status 只许五档：0未提交(草稿) 1审批中 2已通过 3已驳回 4已作废，不许自造它值。
+-- 当前待签层级 cur_level_no 同一时刻只有一个值，不允许一张单同时挂两个人；未提交/结案后为空。
+-- 结案只两条路：末级通过→2，任一级驳回→3。conclusion/closed_at 结案时写死，此后终态单任何一栏都不许改，
+-- 要查变化查 t_is_rect_sign，不许拿现在的单子顶替当时的单子。
+-- 补材料：1→0 退回申请人，补齐重新提交后 round_no+1 且从 level_no=0 重新走起，绝不许从原处接着走。
+CREATE TABLE IF NOT EXISTS t_is_rect_apply (
+  id bigint NOT NULL COMMENT '主键',
+  apply_no varchar(64) DEFAULT NULL COMMENT '申请单号',
+  hazard_id bigint DEFAULT NULL COMMENT '关联隐患（哪条）',
+  hazard_no varchar(64) DEFAULT NULL COMMENT '隐患号（提交时抄存）',
+  hazard_grade int DEFAULT NULL COMMENT '隐患级别（提交时填报抄存）1一般隐患 2重大隐患',
+  hazard_summary varchar(500) DEFAULT NULL COMMENT '隐患概况（提交时抄存，单自成一行看得懂）',
+  applicant varchar(64) DEFAULT NULL COMMENT '申请人（登录账号，提交时写定）',
+  submit_time datetime DEFAULT NULL COMMENT '提交时间（最近一次提交；历次重提查签署留痕）',
+  cur_level_no int DEFAULT NULL COMMENT '当前待签层级（唯一值；未提交/结案为空）',
+  transfer_from_no int DEFAULT NULL COMMENT '本棒正主级：被转交级办完通过后回正主的下一级（正常流转为空）',
+  arrive_at datetime DEFAULT NULL COMMENT '进入当前待签层级的时刻（催办超时从这里起算）',
+  round_no int DEFAULT '1' COMMENT '本轮次：首次提交为1，每补材料重提一次加1，全程留痕',
+  urge_rounds int DEFAULT '0' COMMENT '已催办次数（明细在 t_is_rect_urge）',
+  status int DEFAULT NULL COMMENT '状态 0未提交 1审批中 2已通过 3已驳回 4已作废（只许五档）',
+  conclusion varchar(255) DEFAULT NULL COMMENT '结论（结案时写死，之后不许改）',
+  closed_at datetime DEFAULT NULL COMMENT '结案时间（写死；通过/驳回同一刻落定）',
+  del_flag int DEFAULT '0' COMMENT '删除标记 0正常 1删除',
+  create_by varchar(64) DEFAULT NULL COMMENT '创建者',
+  create_time datetime DEFAULT NULL COMMENT '创建时间',
+  update_by varchar(64) DEFAULT NULL COMMENT '更新者',
+  update_time datetime DEFAULT NULL COMMENT '更新时间',
+  remark varchar(500) DEFAULT NULL COMMENT '备注',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_rect_apply_no (apply_no),
+  KEY idx_apply_status_level (status, cur_level_no),
+  KEY idx_apply_applicant (applicant)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='隐患整改申请审批单';
+
+-- 逐级签署留痕：一张单可有多条，但同一时刻单上当前待签层级只有一个。
+-- 谁签的、什么时候签的、哪一轮、哪一级、什么动作、什么意见，一查就有；补材料往返几轮各留各的，谁也不覆盖谁。
+-- action：SUBMIT提交(含补材料后重提) PASS通过 REJECT驳回 SUPPLEMENT补充材料 TRANSFER转交他级。
+-- 代办：signer 落实际落笔的代办人，agent_for 落原签署人（该是谁还是谁，取自层级配置），agent_reason 落代办原因；
+-- 三样缺一不算代办留痕；非代办时 agent_for 为空。
+-- TRANSFER：target_level_no 记交给哪一级，且本級处理意见必须记全，不许只留一句"转走了"。
+CREATE TABLE IF NOT EXISTS t_is_rect_sign (
+  id bigint NOT NULL COMMENT '主键',
+  apply_id bigint NOT NULL COMMENT '所属申请单',
+  apply_no varchar(64) DEFAULT NULL COMMENT '申请单号（抄存）',
+  round_no int DEFAULT NULL COMMENT '第几轮（首次提交=1，补材料重提累加）',
+  level_no int DEFAULT NULL COMMENT '本级层级次序（提交动作记申请人递交时的入口级）',
+  level_name varchar(64) DEFAULT NULL COMMENT '层级名（落笔时抄存，事后配置改名不改旧痕）',
+  action varchar(16) DEFAULT NULL COMMENT '动作 SUBMIT/PASS/REJECT/SUPPLEMENT/TRANSFER',
+  opinion varchar(1000) DEFAULT NULL COMMENT '本级处理意见（转交也必须记全）',
+  signer varchar(64) DEFAULT NULL COMMENT '实际签署/操作人（代办时为代办人）',
+  agent_for varchar(64) DEFAULT NULL COMMENT '原签署人（代办留痕；非代办为空）',
+  agent_reason varchar(255) DEFAULT NULL COMMENT '代办原因（代办留痕；非代办为空）',
+  target_level_no int DEFAULT NULL COMMENT '转交目标层级（仅 TRANSFER）',
+  sign_time datetime DEFAULT NULL COMMENT '签署/操作时刻',
+  create_by varchar(64) DEFAULT NULL COMMENT '创建者',
+  create_time datetime DEFAULT NULL COMMENT '创建时间',
+  PRIMARY KEY (id),
+  KEY idx_sign_apply (apply_id, round_no, level_no, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='隐患整改申请逐级签署留痕';
+
+-- 催办留痕：单子在某一级卡住超过配置钟点，由定时扫描催办，催一次一条；同一级两次催办间隔不足不再重复刷。
+-- 催的是该级法定签署人（代办不等于换人，仍催配置里的正主）。已作废单不扫不催。
+CREATE TABLE IF NOT EXISTS t_is_rect_urge (
+  id bigint NOT NULL COMMENT '主键',
+  apply_id bigint NOT NULL COMMENT '所属申请单',
+  apply_no varchar(64) DEFAULT NULL COMMENT '申请单号（抄存）',
+  level_no int DEFAULT NULL COMMENT '卡住的层级',
+  level_name varchar(64) DEFAULT NULL COMMENT '层级名（催办时抄存）',
+  signer varchar(64) DEFAULT NULL COMMENT '被催办人（该级法定签署人）',
+  stay_hours int DEFAULT NULL COMMENT '开催时已在本级停留钟点',
+  urged_at datetime DEFAULT NULL COMMENT '催办时刻',
+  detail varchar(500) DEFAULT NULL COMMENT '催办事由（超约定时限多少）',
+  create_by varchar(64) DEFAULT NULL COMMENT '创建者',
+  create_time datetime DEFAULT NULL COMMENT '创建时间',
+  PRIMARY KEY (id),
+  KEY idx_urge_apply (apply_id, level_no, urged_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='隐患整改审批催办留痕';
+
+-- 审批层级配置种子：三级次序写死，签署人对系统账号（fuce/管理员）；各级允停钟点 48/72/96。
+INSERT IGNORE INTO t_is_rect_level (id, level_no, level_name, signer, time_limit_hours, status, del_flag, create_by, create_time)
+VALUES (1, 0, '班组申报', 'fuce', 48, 0, 0, 'seed', NOW()),
+       (2, 1, '安环科审核', 'admin', 72, 0, 0, 'seed', NOW()),
+       (3, 2, '分管领导审批', 'admin', 96, 0, 0, 'seed', NOW());
+
 -- 轮次点算：同一事务里随派发一起落库；一屏三个数与库底数同一次点算。
 -- result_type 只记真正扫描的轮次：1已扫 2本轮无活。窗口关闭/出错不写，不算轮次。
 CREATE TABLE IF NOT EXISTS t_is_dispatch_round (

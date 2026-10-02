@@ -1,8 +1,10 @@
 package com.fc.v2.common.quartz.task;
 import cn.hutool.core.date.DateUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.fc.v2.model.auto.TIsRectUrge;
 import com.fc.v2.model.auto.TSysUser;
 import com.fc.v2.service.ITIsHazTaskService;
+import com.fc.v2.service.ITIsRectApplyService;
 import com.fc.v2.service.ITSysUserService;
 import com.fc.v2.service.haz.RoundScreen;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,6 +26,9 @@ public class V2Task {
 
 	@Autowired
 	private ITIsHazTaskService isHazTaskService;
+
+	@Autowired
+	private ITIsRectApplyService isRectApplyService;
 
     /**
      * 无参的任务
@@ -57,5 +62,17 @@ public class V2Task {
 		System.out.println("催办派发轮次[" + screen.getState() + "] " + screen.getMessage()
 				+ "（待派=" + screen.getWaitCnt() + " 已派=" + screen.getDispatchedCnt()
 				+ " 挂起=" + screen.getSuspendedCnt() + "）执行时间:" + DateUtil.now());
+	}
+
+	/**
+	 * 隐患整改审批催办（由定时任务配置：v2Task.urgeRectApply()）。
+	 * 单子卡在某一级超过平台配置钟点就催该级法定签署人，催一次留一条痕；
+	 * 同一停留段不重复刷，已作废单不扫不催。
+	 */
+	public void urgeRectApply()
+	{
+		List<TIsRectUrge> urged = isRectApplyService.urgeScan();
+		System.out.println("隐患整改审批催办扫描完成：本次催办 " + urged.size()
+				+ " 张超时单，执行时间:" + DateUtil.now());
 	}
 }
